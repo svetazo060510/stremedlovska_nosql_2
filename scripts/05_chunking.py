@@ -8,7 +8,6 @@ from pinecone import Pinecone, ServerlessSpec
 from sentence_transformers import SentenceTransformer
 import warnings
 
-# Вимикаємо системні ворнінги для красивого виведення
 warnings.filterwarnings("ignore")
 load_dotenv()
 

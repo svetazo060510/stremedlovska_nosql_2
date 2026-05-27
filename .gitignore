@@ -220,3 +220,5 @@ __marimo__/
 .DS_Store
 arxiv.zip
 arxiv-metadata-oai-snapshot.json
+data/
+embeddings/
