@@ -39,9 +39,9 @@ def main():
                 region="us-east-1"  # Стандартний безкоштовний регіон (Starter Tier)
             )
         )
-        print(f"✨ Індекс '{INDEX_NAME}' успішно створено!")
+        print(f"Індекс '{INDEX_NAME}' успішно створено!")
     else:
-        print(f"✅ Індекс '{INDEX_NAME}' вже існує.")
+        print(f"Індекс '{INDEX_NAME}' вже існує.")
 
     # Підключаємося до індексу
     index = pc.Index(INDEX_NAME)
@@ -92,7 +92,7 @@ def main():
     index_stats = index.describe_index_stats()
     
     print("\n" + "="*50)
-    print("📊 СТАТИСТИКА ХМАРНОГО ІНДЕКСУ:")
+    print("СТАТИСТИКА ХМАРНОГО ІНДЕКСУ:")
     print(f"Загальна кількість векторів в індексі: {index_stats['total_vector_count']}")
     print("="*50 + "\n")
     print("Завантаження повністю завершено!")
