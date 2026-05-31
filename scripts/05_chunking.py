@@ -115,6 +115,10 @@ def process_and_upload_chunks(articles_df: pd.DataFrame, chunk_strategy_func, in
     for row in records:
         chunks = chunk_strategy_func(row["abstract"], **kwargs)
         for chunk_idx, chunk_text in enumerate(chunks):
+            # Заміна крапок на підкреслення є обов'язковою, оскільки синтаксичні правила 
+            # формування системних ID у Pinecone API мають жорсткі обмеження на спецсимволи.
+            # Щоб уникнути "silently corrupt IDs", оригінальний arXiv ID з крапкою 
+            # зберігається всередині словника metadata під ключем "arxiv_id".
             unique_id = f"chunk_{strategy_name}_{row['id']}_{chunk_idx}".replace(".", "_")
             raw_chunks_info.append({
                 "id": unique_id,
