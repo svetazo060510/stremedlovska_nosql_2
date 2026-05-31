@@ -36,7 +36,7 @@ def main():
             metric="dotproduct", # Використовуємо Dot Product, бо вектори нормалізовані
             spec=ServerlessSpec(
                 cloud="aws",
-                region="us-east-1"  # Стандартний безкоштовний регіон (Starter Tier)
+                region="us-east-1"  # Стандартний безкоштовний регіон
             )
         )
         print(f"Індекс '{INDEX_NAME}' успішно створено!")
@@ -54,38 +54,42 @@ def main():
     df = pd.read_parquet(INPUT_PARQUET)
     embeddings = np.load(INPUT_EMBEDDINGS)
 
-    # 3. Підготовка даних для завантаження
-    print("Формуємо структуровані об'єкти (id, vectors, metadata)...")
-    upsert_data = []
-    
-    for idx, row in df.iterrows():
-        # Обрізаємо абстракт та авторів згідно з вимогами ДЗ
-        clean_abstract = str(row["abstract"])[:500]
-        clean_authors = str(row["authors"])[:200]
-        
-        # Pinecone очікує кортеж: (id, vector, metadata)
-        item = (
-            f"paper_{idx}",                                 # Унікальний id вигляду paper_0, paper_1...
-            embeddings[idx].tolist(),                       # Перетворюємо масив NumPy у звичайний список Python float
-            {                                               # Словник метаданих
-                "arxiv_id": str(row["id"]),
-                "title": str(row["title"]),
-                "abstract": clean_abstract,
-                "authors": clean_authors,
-                "year": int(row["year"]),
-                "category": str(row["category"])
-            }
-        )
-        upsert_data.append(item)
+    # 3 & 4. Підготовка даних та завантаження в Pinecone батчами на льоту
+    total_records = len(df)
+    print(f"\nФормуємо об'єкти та завантажуємо {total_records} векторів у Pinecone батчами по {BATCH_SIZE}...")
 
-    # 4. Завантаження даних в Pinecone батчами з прогрес-баром
-    print(f"\nЗавантажуємо {len(upsert_data)} векторів у Pinecone батчами по {BATCH_SIZE}...")
+    # Перетворюємо DataFrame на список словників для значного прискорення ітерації
+    records = df.to_dict(orient="records")
     
-    # Крокуємо по всьому масиву з кроком BATCH_SIZE
-    for i in tqdm(range(0, len(upsert_data), BATCH_SIZE), desc="Завантаження в хмару"):
-        batch = upsert_data[i:i + BATCH_SIZE]
-        # Команда upsert виконує вставку або оновлення записів
-        index.upsert(vectors=batch)
+    current_batch = []
+    
+    # Використовуємо tqdm з фіксованим total для відображення прогресу батчів
+    with tqdm(total=total_records, desc="Завантаження в хмару") as pbar:
+        # enumerate(..., start=0) гарантує правильну послідовну індексацію векторів
+        for i, row in enumerate(records):
+            clean_abstract = str(row["abstract"])[:500]
+            clean_authors = str(row["authors"])[:200]
+            
+            # Структуруємо елемент для Pinecone
+            item = (
+                f"paper_{i}",                      # Послідовний ID: paper_0, paper_1 ... paper_9999
+                embeddings[i].tolist(),            # Точна відповідність рядку в матриці npy
+                {
+                    "arxiv_id": str(row["id"]),
+                    "title": str(row["title"]),
+                    "abstract": clean_abstract,
+                    "authors": clean_authors,
+                    "year": int(row["year"]),
+                    "category": str(row["category"])
+                }
+            )
+            current_batch.append(item)
+            
+            # Якщо назбирали повний батч або це фінальний елемент — робимо upsert
+            if len(current_batch) == BATCH_SIZE or i == total_records - 1:
+                index.upsert(vectors=current_batch)
+                pbar.update(len(current_batch))    # Оновлюємо прогрес-бар на кількість надісланих векторів
+                current_batch = []                 # Очищуємо батч для економії пам'яті
 
     # 5. Перевірка фінального статусу індексу
     print("\nСинхронізація індексу...")
@@ -95,7 +99,7 @@ def main():
     print("СТАТИСТИКА ХМАРНОГО ІНДЕКСУ:")
     print(f"Загальна кількість векторів в індексі: {index_stats['total_vector_count']}")
     print("="*50 + "\n")
-    print("Завантаження повністю завершено!")
+    print("Завантаження повністю завершено і оптимізовано за пам'яті!")
 
 if __name__ == "__main__":
     main()
