@@ -1,5 +1,5 @@
 import os
-import math
+import re
 import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
@@ -13,13 +13,18 @@ load_dotenv()
 
 INDEX_NAME = "arxiv-papers"
 MODEL_NAME = "allenai/specter2_base"
-TOP_K = 10   # беремо ширше для первинних списків
-FINAL_K = 5  # скільки виводимо у фінальний топ
+TOP_K = 10   # Беремо ширше, щоб RRF міг переранжувати
+FINAL_K = 5  # Скільки виводимо у фінальний топ
 
 # Ініціалізація інструментів
+if "PINECONE_API_KEY" not in os.environ:
+    raise ValueError("PINECONE_API_KEY не знайдено у файлі .env!")
+
 pc = Pinecone(api_key=os.environ["PINECONE_API_KEY"])
 index = pc.Index(INDEX_NAME)
 model = SentenceTransformer(MODEL_NAME)
+
+# reset_index(drop=True) критично важливий для точного мапування embeddings та Pinecone IDs (paper_0..paper_9999)
 df = pd.read_parquet("data/arxiv_subset.parquet").reset_index(drop=True)
 
 # ----------------------------------------------------------------------
@@ -27,10 +32,14 @@ df = pd.read_parquet("data/arxiv_subset.parquet").reset_index(drop=True)
 # ----------------------------------------------------------------------
 print("Будуємо локальний індекс BM25...")
 
-# Для кращої точності об'єднуємо заголовок та анотацію
 def prepare_tokens(text):
-    return str(text).lower().replace("\n", " ").split()
+    """ Токенізація з очищенням від базової пунктуації """
+    clean_text = str(text).lower().replace("\n", " ")
+    # Видаляємо пунктуацію, залишаючи слова та цифри
+    clean_text = re.sub(r'[^\w\s-]', '', clean_text)
+    return clean_text.split()
 
+# Об'єднуємо заголовок та анотацію для кращого лексичного охоплення
 df["bm25_text"] = df["title"] + " " + df["abstract"]
 tokenized_corpus = df["bm25_text"].apply(prepare_tokens).tolist()
 bm25 = BM25Okapi(tokenized_corpus)
@@ -44,15 +53,14 @@ def search_bm25(query: str, top_k: int = TOP_K):
     query_tokens = prepare_tokens(query)
     scores = bm25.get_scores(query_tokens)
     
-    # Сортуємо індекси за спаданням скору
     top_indices = np.argsort(scores)[::-1][:top_k]
     
     results = []
     for rank, idx in enumerate(top_indices, 1):
-        if scores[idx] <= 0:  # Ігноруємо документи без жодного збігу слів
+        if scores[idx] <= 0:  # Ігноруємо документи без жодного лексичного збігу
             continue
         results.append({
-            "id": df.loc[idx, "id"],
+            "id": str(df.loc[idx, "id"]),  # Оригінальний arXiv ID (наприклад, "1401.3753")
             "title": df.loc[idx, "title"],
             "category": df.loc[idx, "category"],
             "year": df.loc[idx, "year"],
@@ -62,18 +70,33 @@ def search_bm25(query: str, top_k: int = TOP_K):
     return results
 
 def search_vector(query: str, top_k: int = TOP_K):
-    """ Векторний пошук у Pinecone """
+    """ Векторний пошук у Pinecone із синхронізацією ID через індекси """
     query_vector = model.encode(query, normalize_embeddings=True).tolist()
     res = index.query(vector=query_vector, top_k=top_k, include_metadata=True)
     
     results = []
     for rank, match in enumerate(res.get("matches", []), 1):
-        meta = match.get("metadata", {})
+        # Дістаємо числовий індекс із ID типу "paper_142"
+        try:
+            row_idx = int(match["id"].replace("paper_", ""))
+            # Беремо метадані з локального DataFrame за цим індексом
+            arxiv_id = str(df.loc[row_idx, "id"])
+            title = df.loc[row_idx, "title"]
+            category = df.loc[row_idx, "category"]
+            year = df.loc[row_idx, "year"]
+        except (ValueError, KeyError):
+            # Якщо структура ID у хмарі відрізняється
+            meta = match.get("metadata", {})
+            arxiv_id = meta.get("arxiv_id", match["id"])
+            title = meta.get("title", "Unknown")
+            category = meta.get("category", "Unknown")
+            year = meta.get("year", 0)
+
         results.append({
-            "id": meta.get("arxiv_id", match["id"].replace("paper_", "").replace("_", ".")),
-            "title": meta.get("title", "Unknown"),
-            "category": meta.get("category", "Unknown"),
-            "year": meta.get("year", 0),
+            "id": arxiv_id, 
+            "title": title,
+            "category": category,
+            "year": year,
             "score": match["score"],
             "rank": rank
         })
@@ -84,7 +107,7 @@ def search_vector(query: str, top_k: int = TOP_K):
 # ----------------------------------------------------------------------
 
 def run_hybrid_search(query: str, k_rrf: int = 60):
-    """ Гібридний пошук через об'єднання рангів BM25 та Pinecone """
+    """ Гібридний пошук через об'єднання рангів BM25 та Pinecone за алгоритмом RRF """
     bm25_results = search_bm25(query, top_k=TOP_K)
     vector_results = search_vector(query, top_k=TOP_K)
     
@@ -120,19 +143,19 @@ def run_hybrid_search(query: str, k_rrf: int = 60):
     return bm25_results[:FINAL_K], vector_results[:FINAL_K], hybrid_results
 
 # ----------------------------------------------------------------------
-# Демонстрація та виведення результатів порівняння
+# Виведення результатів порівняння
 # ----------------------------------------------------------------------
 
 def print_results_table(title, items, is_hybrid=False):
     print(f"\n{title}")
     print("-" * 90)
     if not items:
-        print("Нічого не знайдено.")
+        print("Нічого не знайдено за цим запитом.")
         return
     for i, item in enumerate(items, 1):
         score_str = f"RRF Score: {item['rrf_score']:.5f}" if is_hybrid else f"Score: {item['score']:.4f}"
         print(f"{i}. [{score_str}] ID: {item['id']} | Категорія: {item['category']} | Рік: {int(item['year'])}")
-        print(f"   Заголовок: {item['title'][:80]}...")
+        print(f"   Заголовок: {item['title'][:85]}...")
 
 def main():
     test_queries = [
